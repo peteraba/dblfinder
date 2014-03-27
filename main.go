@@ -31,15 +31,15 @@ func main() {
 	if count > 0 {
 		fmt.Printf("%d files need to be hashed\n", count)
 	} else {
-		fmt.Printf("no files need to be hashed\n", len(same_size_files)*2)
+		fmt.Printf("no files need to be hashed\n")
 		return
 	}
 
-	same_hash_files, count := filterSameHashFiles(same_size_files)
-	if count > 0 {
-		fmt.Printf("%d files have duplicated hashes\n", count)
+	same_hash_files, count2 := filterSameHashFiles(same_size_files)
+	if count2 > 0 {
+		fmt.Printf("%d files have duplicated hashes\n", count2)
 	} else {
-		fmt.Printf("no files has duplicated hashes\n", len(same_size_files)*2)
+		fmt.Printf("no files has duplicated hashes\n")
 		return
 	}
 
@@ -90,20 +90,6 @@ func filterSameSizeFiles(filesizes map[int64][]string) (map[int64][]string, int)
 	return same_size_files, count
 }
 
-// hash calculates the md5 hash value of a file
-func hash(path string) (string, error) {
-	data, err := ioutil.ReadFile(path)
-	if err != nil {
-		return "", err
-	}
-
-	h := md5.New()
-
-	h.Write(data)
-
-	return string(h.Sum(nil)), nil
-}
-
 // filterSameHashFiles removes strings from a same_size_files map all files that have a unique md5 hash
 func filterSameHashFiles(same_size_files map[int64][]string) ([][]string, int) {
 	same_hash_files := [][]string{}
@@ -133,29 +119,61 @@ func getCount() int {
 	return globalCount
 }
 
+type md5ToHash struct {
+	path string
+	md5  string
+	err  error
+}
+
+// hash calculates the md5 hash value of a file and puts it into a channel
+func hashWorker(path string, md5s chan *md5ToHash) {
+	data, err := ioutil.ReadFile(path)
+	if err != nil {
+		md5s <- &md5ToHash{path, "", err}
+		return
+	}
+
+	h := md5.New()
+
+	h.Write(data)
+
+	md5s <- &md5ToHash{path, string(h.Sum(nil)), nil}
+}
+
 // getUniqueHashes calculates the md5 hash of each file present in a map of sizes to paths of same size files
 func getUniqueHashes(files []string) map[string][]string {
-	unique_hashes := make(map[string][]string)
+	md5s := make(chan *md5ToHash)
 
 	for _, path := range files {
-		md5, err := hash(path)
+		go hashWorker(path, md5s)
+	}
 
-		if err != nil {
-			fmt.Printf("hash returned an error: %v\n", err)
-			continue
-		}
+	return getHashResults(md5s, len(files))
+}
 
-		if val, ok := unique_hashes[md5]; ok {
-			unique_hashes[md5] = append(val, path)
-		} else {
-			unique_hashes[md5] = []string{path}
-		}
+// collects worker results
+func getHashResults(md5s chan *md5ToHash, max int) map[string][]string {
+	unique_hashes := make(map[string][]string)
+
+	for i := 0; i < max; i++ {
+		md5_to_hash := <-md5s
 
 		count := getCount()
 		fmt.Printf("%d ", count)
 
 		if count%10 == 0 {
 			fmt.Println()
+		}
+
+		if md5_to_hash.err != nil {
+			fmt.Printf("\nhash returned an error: %v\n", md5_to_hash.err)
+			continue
+		}
+
+		if val, ok := unique_hashes[md5_to_hash.md5]; ok {
+			unique_hashes[md5_to_hash.md5] = append(val, md5_to_hash.path)
+		} else {
+			unique_hashes[md5_to_hash.md5] = []string{md5_to_hash.path}
 		}
 	}
 
