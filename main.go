@@ -1,3 +1,10 @@
+// Copyright 2014 DevMonk. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+/*
+Dblfinder provides a command-line tool for finding duplicated files
+*/
 package main
 
 import (
@@ -39,11 +46,13 @@ func main() {
 	cleanUp(same_hash_files)
 }
 
+// getRoot returns the first argument provided
 func getRoot() string {
 	flag.Parse()
 	return flag.Arg(0)
 }
 
+// getAllFilesizes scans the root directory recursively and returns the path of each file found
 func getAllFilesizes(root string) (map[int64][]string, error) {
 	filesizes := make(map[int64][]string)
 
@@ -66,6 +75,7 @@ func getAllFilesizes(root string) (map[int64][]string, error) {
 	return filesizes, err
 }
 
+// filterSameSizeFiles returns a list of filepaths that have non-unique length
 func filterSameSizeFiles(filesizes map[int64][]string) (map[int64][]string, int) {
 	same_size_files := make(map[int64][]string)
 	count := 0
@@ -80,6 +90,7 @@ func filterSameSizeFiles(filesizes map[int64][]string) (map[int64][]string, int)
 	return same_size_files, count
 }
 
+// hash calculates the md5 hash value of a file
 func hash(path string) (string, error) {
 	data, err := ioutil.ReadFile(path)
 	if err != nil {
@@ -93,6 +104,7 @@ func hash(path string) (string, error) {
 	return string(h.Sum(nil)), nil
 }
 
+// filterSameHashFiles removes strings from a same_size_files map all files that have a unique md5 hash
 func filterSameHashFiles(same_size_files map[int64][]string) ([][]string, int) {
 	same_hash_files := [][]string{}
 	count := 0
@@ -115,6 +127,13 @@ func filterSameHashFiles(same_size_files map[int64][]string) ([][]string, int) {
 
 var globalCount int
 
+// getCount returns a unique, incremented value
+func getCount() int {
+	globalCount += 1
+	return globalCount
+}
+
+// getUniqueHashes calculates the md5 hash of each file present in a map of sizes to paths of same size files
 func getUniqueHashes(files []string) map[string][]string {
 	unique_hashes := make(map[string][]string)
 
@@ -132,11 +151,10 @@ func getUniqueHashes(files []string) map[string][]string {
 			unique_hashes[md5] = []string{path}
 		}
 
-		globalCount += 1
+		count := getCount()
+		fmt.Printf("%d ", count)
 
-		fmt.Printf("%d ", globalCount)
-
-		if globalCount%10 == 0 {
+		if count%10 == 0 {
 			fmt.Println()
 		}
 	}
@@ -144,6 +162,10 @@ func getUniqueHashes(files []string) map[string][]string {
 	return unique_hashes
 }
 
+// cleanUp deletes all, but one instance of the same file
+// number of kept file is read from standard input (count starts from 1)
+// number zero returned will skip file deletion
+// os part is done in deleteAllFilesButI
 func cleanUp(same_hash_files [][]string) {
 	for _, files := range same_hash_files {
 		fmt.Println("The following files are the same:")
@@ -166,6 +188,7 @@ func cleanUp(same_hash_files [][]string) {
 	}
 }
 
+// readInt reads an integer from standard input, minimum value is 0, maximum is given as parameter
 func readInt(max int) int {
 	var i int
 
@@ -186,6 +209,7 @@ func readInt(max int) int {
 	return i
 }
 
+// deleteAllFilesButI deletes a list of files, except for the i.-th file, counting from 1
 func deleteAllFilesButI(files []string, i int) {
 	del_files := append(files[:i-1], files[i:]...)
 
