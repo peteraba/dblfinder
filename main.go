@@ -16,8 +16,11 @@ import (
 	"path/filepath"
 )
 
+const ACTION_LIST = "list"
+const ACTION_FIX = "fix"
+
 func main() {
-	root := getRoot()
+	action, root := getFlags()
 
 	filesizes, err := getAllFilesizes(root)
 	if err != nil {
@@ -43,13 +46,24 @@ func main() {
 		return
 	}
 
-	cleanUp(same_hash_files)
+	if action == ACTION_LIST {
+		listAll(same_hash_files)
+	} else {
+		cleanUp(same_hash_files)
+	}
 }
 
 // getRoot returns the first argument provided
-func getRoot() string {
+func getFlags() (string, string) {
+	var action = (*flag.String("action", ACTION_LIST, "help message for flagname"))
+
+	if action != ACTION_LIST && action != ACTION_FIX {
+		action = ACTION_LIST
+	}
+
 	flag.Parse()
-	return flag.Arg(0)
+
+	return action, flag.Arg(0)
 }
 
 // getAllFilesizes scans the root directory recursively and returns the path of each file found
@@ -240,5 +254,21 @@ func deleteAllFilesButI(files []string, i int) {
 		} else {
 			fmt.Println("done.")
 		}
+	}
+}
+
+// cleanUp deletes all, but one instance of the same file
+// number of kept file is read from standard input (count starts from 1)
+// number zero returned will skip file deletion
+// os part is done in deleteAllFilesButI
+func listAll(same_hash_files [][]string) {
+	for _, files := range same_hash_files {
+		fmt.Println("The following files are the same:")
+
+		for key, file := range files {
+			fmt.Printf("[%d] %s\n", key+1, file)
+		}
+
+		fmt.Println()
 	}
 }
