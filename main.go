@@ -204,8 +204,6 @@ func getHashResults(md5s chan *md5ToHash, max int) map[string][]string {
 	for i := 0; i < max; i++ {
 		md5_to_hash := <-md5s
 
-		count := getCount()
-
 		if md5_to_hash.err != nil {
 			fmt.Printf("\nhash returned an error: %v\n", md5_to_hash.err)
 			continue
