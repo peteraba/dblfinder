@@ -34,7 +34,7 @@ func main() {
 	if count > 0 {
 		fmt.Printf("%d files need to be hashed\n", count)
 	} else {
-		fmt.Printf("no files need to be hashed\n")
+		fmt.Printf("No files need to be hashed\n")
 		return
 	}
 
@@ -42,7 +42,7 @@ func main() {
 	if count2 > 0 {
 		fmt.Printf("%d files have duplicated hashes\n", count2)
 	} else {
-		fmt.Printf("no files has duplicated hashes\n")
+		fmt.Printf("No files have duplicated hashes\n")
 		return
 	}
 
