@@ -20,7 +20,7 @@ const ACTION_LIST = "list"
 const ACTION_FIX = "fix"
 
 func main() {
-	action, root := getFlags()
+	action, limit, verbose, root := getFlags()
 
 	filesizes, err := getAllFilesizes(root)
 	if err != nil {
@@ -38,7 +38,7 @@ func main() {
 		return
 	}
 
-	same_hash_files, count2 := filterSameHashFiles(same_size_files)
+	same_hash_files, count2 := filterSameHashFiles(same_size_files, limit, verbose)
 	if count2 > 0 {
 		fmt.Printf("%d files have duplicated hashes\n", count2)
 	} else {
@@ -47,23 +47,35 @@ func main() {
 	}
 
 	if action == ACTION_LIST {
-		listAll(same_hash_files)
+		listAll(same_hash_files, limit)
 	} else {
-		cleanUp(same_hash_files)
+		cleanUp(same_hash_files, limit)
 	}
 }
 
 // getRoot returns the first argument provided
-func getFlags() (string, string) {
-	var action = (*flag.String("action", ACTION_LIST, "help message for flagname"))
-
-	if action != ACTION_LIST && action != ACTION_FIX {
-		action = ACTION_LIST
-	}
+func getFlags() (string, int, bool, string) {
+	var action = flag.String("action", ACTION_LIST, "list or fix")
+	var limit = flag.Int("limit", 100, "number of items to compare max.")
+	var verbose = flag.Bool("verbose", false, "verbose output")
 
 	flag.Parse()
 
-	return action, flag.Arg(0)
+	if *action != ACTION_LIST && *action != ACTION_FIX {
+		*action = ACTION_LIST
+	}
+
+	if *limit < 0 {
+		*limit = 0
+	}
+
+	fmt.Println("action: " + *action)
+	if *verbose {
+		fmt.Println("verbose")
+	}
+	fmt.Printf("limit: %d\n", *limit)
+
+	return *action, *limit, *verbose, flag.Arg(0)
 }
 
 // getAllFilesizes scans the root directory recursively and returns the path of each file found
@@ -105,12 +117,18 @@ func filterSameSizeFiles(filesizes map[int64][]string) (map[int64][]string, int)
 }
 
 // filterSameHashFiles removes strings from a same_size_files map all files that have a unique md5 hash
-func filterSameHashFiles(same_size_files map[int64][]string) ([][]string, int) {
+func filterSameHashFiles(same_size_files map[int64][]string, limit int, verbose bool) ([][]string, int) {
 	same_hash_files := [][]string{}
 	count := 0
+	cur := 0
 
 	for _, files := range same_size_files {
-		unique_hashes := getUniqueHashes(files)
+		if limit > 0 && cur >= limit {
+			fmt.Printf("\nHashing limit is reached.\n")
+			break
+		}
+
+		unique_hashes := getUniqueHashes(files, verbose)
 
 		for _, paths := range unique_hashes {
 			if len(paths) > 1 {
@@ -118,6 +136,7 @@ func filterSameHashFiles(same_size_files map[int64][]string) ([][]string, int) {
 				count += len(paths)
 			}
 		}
+		cur += 1
 	}
 
 	fmt.Println()
@@ -140,9 +159,16 @@ type md5ToHash struct {
 }
 
 // hash calculates the md5 hash value of a file and puts it into a channel
-func hashWorker(path string, md5s chan *md5ToHash) {
+func hashWorker(path string, md5s chan *md5ToHash, verbose bool) {
+	if verbose {
+		fmt.Printf("About to read \"%s\"\n", path)
+	}
+
 	data, err := ioutil.ReadFile(path)
 	if err != nil {
+		if verbose {
+			fmt.Printf("Reading data for \"%s\" failed.\n", path)
+		}
 		md5s <- &md5ToHash{path, "", err}
 		return
 	}
@@ -151,15 +177,21 @@ func hashWorker(path string, md5s chan *md5ToHash) {
 
 	h.Write(data)
 
-	md5s <- &md5ToHash{path, string(h.Sum(nil)), nil}
+	sum := h.Sum(nil)
+
+	if verbose {
+		fmt.Printf("Calculated md5 of \"%s\".\n", path)
+	}
+
+	md5s <- &md5ToHash{path, string(sum), nil}
 }
 
 // getUniqueHashes calculates the md5 hash of each file present in a map of sizes to paths of same size files
-func getUniqueHashes(files []string) map[string][]string {
+func getUniqueHashes(files []string, verbose bool) map[string][]string {
 	md5s := make(chan *md5ToHash)
 
 	for _, path := range files {
-		go hashWorker(path, md5s)
+		go hashWorker(path, md5s, verbose)
 	}
 
 	return getHashResults(md5s, len(files))
@@ -198,8 +230,13 @@ func getHashResults(md5s chan *md5ToHash, max int) map[string][]string {
 // number of kept file is read from standard input (count starts from 1)
 // number zero returned will skip file deletion
 // os part is done in deleteAllFilesButI
-func cleanUp(same_hash_files [][]string) {
-	for _, files := range same_hash_files {
+func cleanUp(same_hash_files [][]string, limit int) {
+	for key, files := range same_hash_files {
+		if limit > 0 && key >= limit {
+			fmt.Println("Cleanup limit is reached.")
+			break
+		}
+
 		fmt.Println("The following files are the same:")
 
 		for key, file := range files {
@@ -261,8 +298,13 @@ func deleteAllFilesButI(files []string, i int) {
 // number of kept file is read from standard input (count starts from 1)
 // number zero returned will skip file deletion
 // os part is done in deleteAllFilesButI
-func listAll(same_hash_files [][]string) {
-	for _, files := range same_hash_files {
+func listAll(same_hash_files [][]string, limit int) {
+	for key, files := range same_hash_files {
+		if limit > 0 && key >= limit {
+			fmt.Println("Listing limit is reached.")
+			break
+		}
+
 		fmt.Println("The following files are the same:")
 
 		for key, file := range files {
