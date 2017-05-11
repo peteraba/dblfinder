@@ -1,81 +1,113 @@
-// Copyright 2014 DevMonk. All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
-
 /*
-Dblfinder provides a command-line tool for finding duplicated files
+Dblfinder provides a command-line tool for finding duplicated files.
+When duplicates are found, it can provide an option to delete one of the them.
 */
 package main
 
 import (
 	"crypto/md5"
-	"flag"
 	"fmt"
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"strconv"
+
+	docopt "github.com/docopt/docopt-go"
 )
 
-const ACTION_LIST = "list"
-const ACTION_FIX = "fix"
+const name = "dblfinder"
+const version = "0.2.0"
+const usage = `
+Dblfinder provides a command-line tool for finding duplicated files.
+When duplicates are found, it can provide an option to delete one of the them.
+
+Usage:
+  dblfinder -h | --help
+  dblfinder -v | --version
+  dblfinder [--fix] [--limit=<n>] [--verbose] <root>
+
+Options:
+  -h --help     display help
+  -v --version  display version number
+  --fix         try to fix issues, not only list them
+  --limit=<n>   limit the maximum number of duplicates to fix [default: 0]
+  --verbose     provide verbose output
+`
 
 func main() {
-	action, limit, verbose, root := getFlags()
+	fix, limit, verbose, root, err := getFlags()
+	if root == "" {
+		fmt.Printf("No root is provided", err)
+		return
+	}
 
 	filesizes, err := getAllFilesizes(root)
 	if err != nil {
 		fmt.Printf("filepath.Walk() returned an error: %v\n", err)
 		return
 	} else {
-		fmt.Printf("visited at least %d files\n", len(filesizes))
+		fmt.Printf("Visited at least %d files\n", len(filesizes))
 	}
 
-	same_size_files, count := filterSameSizeFiles(filesizes)
+	sameSizeFiles, count := filterSameSizeFiles(filesizes)
 	if count > 0 {
-		fmt.Printf("%d files need to be hashed\n", count)
+		fmt.Printf("%d files were be hashed\n", count)
 	} else {
-		fmt.Printf("No files need to be hashed\n")
+		fmt.Printf("No files were be hashed\n")
 		return
 	}
 
-	same_hash_files, count2 := filterSameHashFiles(same_size_files, limit, verbose)
-	if count2 > 0 {
-		fmt.Printf("%d files have duplicated hashes\n", count2)
+	sameHashFiles, count := filterSameHashFiles(sameSizeFiles, limit, verbose)
+	if count > 0 {
+		fmt.Printf("%d files have duplicated hashes\n", count)
 	} else {
 		fmt.Printf("No files have duplicated hashes\n")
 		return
 	}
 
-	if action == ACTION_LIST {
-		listAll(same_hash_files, limit)
+	if fix {
+		cleanUp(sameHashFiles, limit)
 	} else {
-		cleanUp(same_hash_files, limit)
+		listAll(sameHashFiles, limit)
 	}
 }
 
-// getRoot returns the first argument provided
-func getFlags() (string, int, bool, string) {
-	var action = flag.String("action", ACTION_LIST, "list or fix")
-	var limit = flag.Int("limit", 100, "number of items to compare max.")
-	var verbose = flag.Bool("verbose", false, "verbose output")
+func getFlags() (bool, int, bool, string, error) {
+	var (
+		fix      bool
+		limit    int
+		verbose  bool
+		root     string
+		rawLimit string
+		limit64  int64
+	)
 
-	flag.Parse()
-
-	if *action != ACTION_LIST && *action != ACTION_FIX {
-		*action = ACTION_LIST
+	arguments, err := docopt.Parse(usage, nil, true, fmt.Sprintf("%s %s", name, version), false)
+	if err != nil {
+		return fix, limit, verbose, root, err
 	}
 
-	if *limit < 0 {
-		*limit = 0
+	if arguments["fix"] != nil {
+		fix = true
+	}
+	if arguments["verbose"] != nil {
+		verbose = true
+	}
+	if arguments["limit"] != nil {
+		rawLimit = arguments["limit"].(string)
+	}
+	root = arguments["<root>"].(string)
+
+	if rawLimit != "" {
+		limit64, err = strconv.ParseInt(rawLimit, 10, 64)
+
+		limit = int(limit64)
+		if limit < 0 {
+			limit = 0
+		}
 	}
 
-	fmt.Println("action: " + *action)
-	if *verbose {
-		fmt.Println("verbose")
-	}
-	fmt.Printf("limit: %d\n", *limit)
-
-	return *action, *limit, *verbose, flag.Arg(0)
+	return fix, limit, verbose, root, nil
 }
 
 // getAllFilesizes scans the root directory recursively and returns the path of each file found
@@ -103,36 +135,36 @@ func getAllFilesizes(root string) (map[int64][]string, error) {
 
 // filterSameSizeFiles returns a list of filepaths that have non-unique length
 func filterSameSizeFiles(filesizes map[int64][]string) (map[int64][]string, int) {
-	same_size_files := make(map[int64][]string)
+	sameSizeFiles := make(map[int64][]string)
 	count := 0
 
 	for size, files := range filesizes {
 		if len(files) > 1 {
-			same_size_files[size] = files
+			sameSizeFiles[size] = files
 			count += len(files)
 		}
 	}
 
-	return same_size_files, count
+	return sameSizeFiles, count
 }
 
-// filterSameHashFiles removes strings from a same_size_files map all files that have a unique md5 hash
-func filterSameHashFiles(same_size_files map[int64][]string, limit int, verbose bool) ([][]string, int) {
-	same_hash_files := [][]string{}
+// filterSameHashFiles removes strings from a sameSizeFiles map all files that have a unique md5 hash
+func filterSameHashFiles(sameSizeFiles map[int64][]string, limit int, verbose bool) ([][]string, int) {
+	sameHashFiles := [][]string{}
 	count := 0
 	cur := 0
 
-	for _, files := range same_size_files {
+	for _, files := range sameSizeFiles {
 		if limit > 0 && cur >= limit {
 			fmt.Printf("\nHashing limit is reached.\n")
 			break
 		}
 
-		unique_hashes := getUniqueHashes(files, verbose)
+		uniqueHashes := getUniqueHashes(files, verbose)
 
-		for _, paths := range unique_hashes {
+		for _, paths := range uniqueHashes {
 			if len(paths) > 1 {
-				same_hash_files = append(same_hash_files, paths)
+				sameHashFiles = append(sameHashFiles, paths)
 				count += len(paths)
 			}
 		}
@@ -141,7 +173,7 @@ func filterSameHashFiles(same_size_files map[int64][]string, limit int, verbose 
 
 	fmt.Println()
 
-	return same_hash_files, count
+	return sameHashFiles, count
 }
 
 var globalCount int
@@ -158,7 +190,7 @@ type md5ToHash struct {
 	err  error
 }
 
-// hash calculates the md5 hash value of a file and puts it into a channel
+// hashWorker calculates the md5 hash value of a file and pushes it into a channel
 func hashWorker(path string, md5s chan *md5ToHash, verbose bool) {
 	if verbose {
 		fmt.Printf("About to read \"%s\"\n", path)
@@ -199,32 +231,32 @@ func getUniqueHashes(files []string, verbose bool) map[string][]string {
 
 // collects worker results
 func getHashResults(md5s chan *md5ToHash, max int) map[string][]string {
-	unique_hashes := make(map[string][]string)
+	uniqueHashes := make(map[string][]string)
 
 	for i := 0; i < max; i++ {
-		md5_to_hash := <-md5s
+		md5ToHash := <-md5s
 
-		if md5_to_hash.err != nil {
-			fmt.Printf("\nhash returned an error: %v\n", md5_to_hash.err)
+		if md5ToHash.err != nil {
+			fmt.Printf("\nhash returned an error: %v\n", md5ToHash.err)
 			continue
 		}
 
-		if val, ok := unique_hashes[md5_to_hash.md5]; ok {
-			unique_hashes[md5_to_hash.md5] = append(val, md5_to_hash.path)
+		if val, ok := uniqueHashes[md5ToHash.md5]; ok {
+			uniqueHashes[md5ToHash.md5] = append(val, md5ToHash.path)
 		} else {
-			unique_hashes[md5_to_hash.md5] = []string{md5_to_hash.path}
+			uniqueHashes[md5ToHash.md5] = []string{md5ToHash.path}
 		}
 	}
 
-	return unique_hashes
+	return uniqueHashes
 }
 
 // cleanUp deletes all, but one instance of the same file
 // number of kept file is read from standard input (count starts from 1)
 // number zero returned will skip file deletion
 // os part is done in deleteAllFilesButI
-func cleanUp(same_hash_files [][]string, limit int) {
-	for key, files := range same_hash_files {
+func cleanUp(sameSizeFiles [][]string, limit int) {
+	for key, files := range sameSizeFiles {
 		if limit > 0 && key >= limit {
 			fmt.Println("Cleanup limit is reached.")
 			break
@@ -273,9 +305,9 @@ func readInt(max int) int {
 
 // deleteAllFilesButI deletes a list of files, except for the i.-th file, counting from 1
 func deleteAllFilesButI(files []string, i int) {
-	del_files := append(files[:i-1], files[i:]...)
+	delFiles := append(files[:i-1], files[i:]...)
 
-	for _, file := range del_files {
+	for _, file := range delFiles {
 		fmt.Printf("Removing: %s\n", file)
 
 		err := os.Remove(file)
@@ -291,8 +323,8 @@ func deleteAllFilesButI(files []string, i int) {
 // number of kept file is read from standard input (count starts from 1)
 // number zero returned will skip file deletion
 // os part is done in deleteAllFilesButI
-func listAll(same_hash_files [][]string, limit int) {
-	for key, files := range same_hash_files {
+func listAll(sameSizeFiles [][]string, limit int) {
+	for key, files := range sameSizeFiles {
 		if limit > 0 && key >= limit {
 			fmt.Println("Listing limit is reached.")
 			break
