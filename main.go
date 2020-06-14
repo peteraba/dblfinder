@@ -15,7 +15,7 @@ import (
 	"sync"
 )
 
-const version = "0.4.4"
+const version = "0.4.5"
 
 func getFlags() (bool, int, bool, string, string, bool) {
 	var (
@@ -56,12 +56,12 @@ func main() {
 		root = "."
 	}
 
-	filesizes, err := getAllFilesizes(root)
+	filesizes, err := getAllFilesizes(root, verbose)
 	if err != nil {
 		fmt.Printf("filepath.Walk() returned an error: %v\n", err)
 		return
 	} else {
-		fmt.Printf("Found %d unique filenames\n", len(filesizes))
+		fmt.Printf("Found %d unique file sizes\n", len(filesizes))
 	}
 
 	sameSizeFiles, count := filterSameSizeFiles(filesizes)
@@ -88,7 +88,7 @@ func main() {
 }
 
 // getAllFilesizes scans the root directory recursively and returns the path of each file found
-func getAllFilesizes(root string) (map[int64][]string, error) {
+func getAllFilesizes(root string, verbose bool) (map[int64][]string, error) {
 	filesizes := make(map[int64][]string)
 
 	visit := func(path string, f os.FileInfo, err error) error {
@@ -101,6 +101,9 @@ func getAllFilesizes(root string) (map[int64][]string, error) {
 			panic(err2)
 		}
 		if p != path {
+			if verbose {
+				log.Printf("symlink found: %s <-> %s\n", p, path)
+			}
 			return nil
 		}
 
