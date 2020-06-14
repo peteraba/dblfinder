@@ -12,10 +12,9 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sync"
 )
 
-const version = "0.4.5"
+const version = "0.4.6"
 
 func getFlags() (bool, int, bool, string, string, bool) {
 	var (
@@ -170,10 +169,7 @@ type md5ToHash struct {
 }
 
 // hashWorker calculates the md5 hash value of a file and pushes it into a channel
-func hashWorker(path string, md5s chan *md5ToHash, wg *sync.WaitGroup, verbose bool) {
-	wg.Add(1)
-	defer wg.Done()
-
+func hashWorker(path string, md5s chan *md5ToHash, verbose bool) {
 	if verbose {
 		fmt.Printf("About to read \"%s\"\n", path)
 	}
@@ -182,7 +178,6 @@ func hashWorker(path string, md5s chan *md5ToHash, wg *sync.WaitGroup, verbose b
 	if err != nil {
 		log.Fatal(err)
 	}
-
 
 	data := make([]byte, 1024)
 
@@ -213,17 +208,10 @@ func hashWorker(path string, md5s chan *md5ToHash, wg *sync.WaitGroup, verbose b
 
 // getUniqueHashes calculates the md5 hash of each file present in a map of sizes to paths of same size files
 func getUniqueHashes(files []string, fsLimit int, verbose bool) map[string][]string {
-	var wg sync.WaitGroup
-	md5s := make(chan *md5ToHash)
+	md5s := make(chan *md5ToHash, fsLimit)
 
-	for i, path := range files {
-		go hashWorker(path, md5s, &wg, verbose)
-		if fsLimit > 0 && (i % fsLimit == 0) {
-			if verbose {
-				fmt.Printf("waiting for waiting group...\n")
-			}
-			wg.Wait()
-		}
+	for _, path := range files {
+		go hashWorker(path, md5s, verbose)
 	}
 
 	return getHashResults(md5s, len(files))
