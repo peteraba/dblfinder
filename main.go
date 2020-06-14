@@ -15,7 +15,7 @@ import (
 	"sync"
 )
 
-const version = "0.4.2"
+const version = "0.4.3"
 
 func getFlags() (bool, int, bool, string, string, bool) {
 	var (
@@ -96,9 +96,9 @@ func getAllFilesizes(root string) (map[int64][]string, error) {
 			return nil
 		}
 
-		p, err := filepath.EvalSymlinks(path)
-		if err != nil {
-			panic(err)
+		p, err2 := filepath.EvalSymlinks(path)
+		if err2 != nil {
+			panic(err2)
 		}
 		if p != path {
 			return nil
