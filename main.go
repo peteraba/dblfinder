@@ -12,40 +12,22 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sync"
 )
 
-const name = "dblfinder"
-const version = "0.3.0"
-const usage = `
-Dblfinder provides a command-line tool for finding duplicated files.
-When duplicates are found, it can provide an option to delete one of the them.
-
-Usage:
-  dblfinder --help
-  dblfinder --version
-  dblfinder [--fix] [--limit=<n>] [--verbose] <root>
-
-Options:
-  --help         display help
-  --version      display version number
-  --verbose      provide verbose output
-  --fix          try to fix issues, not only list them
-  --prefer=<s>   prefer path if it matches regexp defined here
-  --skip-manual  skip decisions if prefer did not find anything
-  --limit=<n>    limit the maximum number of duplicates to fix [default: 0]
-`
+const version = "0.4.0"
 
 func getFlags() (bool, int, bool, string, string, bool) {
 	var (
 		showHelp, showVersion, verbose, fix, skipManual bool
-		limit                                           int
+		fsLimit                                         int
 		prefer, root                                    string
 	)
 
 	flag.BoolVar(&showHelp, "help", false, "display help")
 	flag.BoolVar(&showVersion, "version", false, "display the version number")
 	flag.BoolVar(&verbose, "verbose", false, "provide verbose output")
-	flag.IntVar(&limit, "limit", 0, "limit the maximum number of duplicates to fix")
+	flag.IntVar(&fsLimit, "fs-limit", 0, "limit the maximum number open files")
 	flag.BoolVar(&fix, "fix", false, "try to fix issues, not only list them")
 	flag.StringVar(&prefer, "prefer", "", "limit the maximum number of duplicates to fix")
 	flag.BoolVar(&skipManual, "skip-manual", false, "skip decisions if prefer did not find anything")
@@ -64,15 +46,14 @@ func getFlags() (bool, int, bool, string, string, bool) {
 		os.Exit(0)
 	}
 
-	return fix, limit, verbose, root, prefer, skipManual
+	return fix, fsLimit, verbose, root, prefer, skipManual
 }
 
 func main() {
-	fix, limit, verbose, root, prefer, skipManual := getFlags()
+	fix, fsLimit, verbose, root, prefer, skipManual := getFlags()
 
 	if root == "" {
-		fmt.Printf("No root is provided")
-		return
+		root = "."
 	}
 
 	filesizes, err := getAllFilesizes(root)
@@ -91,7 +72,7 @@ func main() {
 		return
 	}
 
-	sameHashFiles, count := filterSameHashFiles(sameSizeFiles, limit, verbose)
+	sameHashFiles, count := filterSameHashFiles(sameSizeFiles, fsLimit, verbose)
 	if count > 0 {
 		fmt.Printf("%d files have duplicated hashes\n", count)
 	} else {
@@ -102,7 +83,7 @@ func main() {
 	if fix {
 		cleanUp(sameHashFiles, prefer, skipManual)
 	} else {
-		listAll(sameHashFiles, limit)
+		listAll(sameHashFiles)
 	}
 }
 
@@ -145,22 +126,17 @@ func filterSameSizeFiles(filesizes map[int64][]string) (map[int64][]string, int)
 }
 
 // filterSameHashFiles removes strings from a sameSizeFiles, and map all files that have a unique md5 hash
-func filterSameHashFiles(sameSizeFiles map[int64][]string, limit int, verbose bool) ([][]string, int) {
+func filterSameHashFiles(sameSizeFiles map[int64][]string, fsLimit int, verbose bool) ([][]string, int) {
 	sameHashFiles := [][]string{}
 	count := 0
 	cur := 0
 
 	for _, files := range sameSizeFiles {
-		if limit > 0 && cur >= limit {
-			fmt.Printf("\nHashing limit is reached.\n")
-			break
-		}
-
 		if verbose {
 			fmt.Printf("Hashing files: %v\n", files)
 		}
 
-		uniqueHashes := getUniqueHashes(files, verbose)
+		uniqueHashes := getUniqueHashes(files, fsLimit, verbose)
 
 		for _, paths := range uniqueHashes {
 			if len(paths) > 1 {
@@ -176,14 +152,6 @@ func filterSameHashFiles(sameSizeFiles map[int64][]string, limit int, verbose bo
 	return sameHashFiles, count
 }
 
-var globalCount int
-
-// getCount returns a unique, incremented value
-func getCount() int {
-	globalCount += 1
-	return globalCount
-}
-
 type md5ToHash struct {
 	path string
 	md5  string
@@ -191,7 +159,7 @@ type md5ToHash struct {
 }
 
 // hashWorker calculates the md5 hash value of a file and pushes it into a channel
-func hashWorker(path string, md5s chan *md5ToHash, verbose bool) {
+func hashWorker(path string, md5s chan *md5ToHash, wg *sync.WaitGroup, verbose bool) {
 	if verbose {
 		fmt.Printf("About to read \"%s\"\n", path)
 	}
@@ -200,6 +168,9 @@ func hashWorker(path string, md5s chan *md5ToHash, verbose bool) {
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	wg.Add(1)
+	defer wg.Done()
 
 	data := make([]byte, 1024)
 
@@ -212,28 +183,32 @@ func hashWorker(path string, md5s chan *md5ToHash, verbose bool) {
 		log.Fatal(err)
 	}
 
-	h := md5.New()
-
-	h.Write(data)
-
-	sum := h.Sum(nil)
+	md5Hasher := md5.New()
+	_, err = md5Hasher.Write(data)
+	if err != nil {
+		log.Fatal(err)
+	}
+	sum := md5Hasher.Sum(nil)
 
 	if verbose {
 		fmt.Printf("Calculated md5 of \"%s\".\n", path)
 	} else {
 		fmt.Print(".")
-
 	}
 
 	md5s <- &md5ToHash{path, string(sum), nil}
 }
 
 // getUniqueHashes calculates the md5 hash of each file present in a map of sizes to paths of same size files
-func getUniqueHashes(files []string, verbose bool) map[string][]string {
+func getUniqueHashes(files []string, fsLimit int, verbose bool) map[string][]string {
+	var wg sync.WaitGroup
 	md5s := make(chan *md5ToHash)
 
-	for _, path := range files {
-		go hashWorker(path, md5s, verbose)
+	for i, path := range files {
+		go hashWorker(path, md5s, &wg, verbose)
+		if fsLimit > 0 && (i % fsLimit == 0) {
+			wg.Wait()
+		}
 	}
 
 	return getHashResults(md5s, len(files))
@@ -357,14 +332,9 @@ func deleteOtherFiles(files []string, keep int) {
 // number of kept file is read from standard input (count starts from 1)
 // number zero returned will skip file deletion
 // os part is done in deleteOtherFiles
-func listAll(sameSizeFiles [][]string, limit int) {
-	for key, files := range sameSizeFiles {
-		if limit > 0 && key >= limit {
-			fmt.Println("Listing limit is reached.")
-			break
-		}
-
-		fmt.Println("The following files are the same:")
+func listAll(sameSizeFiles [][]string) {
+	for _, files := range sameSizeFiles {
+		fmt.Println("The following files are likely the same:")
 
 		for key, file := range files {
 			fmt.Printf("[%d] %s\n", key+1, file)
