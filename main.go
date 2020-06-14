@@ -15,7 +15,7 @@ import (
 	"sync"
 )
 
-const version = "0.4.1"
+const version = "0.4.2"
 
 func getFlags() (bool, int, bool, string, string, bool) {
 	var (
@@ -96,6 +96,14 @@ func getAllFilesizes(root string) (map[int64][]string, error) {
 			return nil
 		}
 
+		p, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			panic(err)
+		}
+		if p != path {
+			return nil
+		}
+
 		if val, ok := filesizes[f.Size()]; ok {
 			filesizes[f.Size()] = append(val, path)
 		} else {
@@ -160,6 +168,9 @@ type md5ToHash struct {
 
 // hashWorker calculates the md5 hash value of a file and pushes it into a channel
 func hashWorker(path string, md5s chan *md5ToHash, wg *sync.WaitGroup, verbose bool) {
+	wg.Add(1)
+	defer wg.Done()
+
 	if verbose {
 		fmt.Printf("About to read \"%s\"\n", path)
 	}
@@ -169,29 +180,27 @@ func hashWorker(path string, md5s chan *md5ToHash, wg *sync.WaitGroup, verbose b
 		log.Fatal(err)
 	}
 
-	wg.Add(1)
-	defer wg.Done()
 
 	data := make([]byte, 1024)
 
 	_, err = f.Read(data)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("error reading file: %s, err %v", path, err)
 	}
 
 	if err := f.Close(); err != nil {
-		log.Fatal(err)
+		log.Fatalf("failed closing file: %s, err %v", path, err)
 	}
 
 	md5Hasher := md5.New()
 	_, err = md5Hasher.Write(data)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("failed calculating hash for file: %s, err %v", path, err)
 	}
 	sum := md5Hasher.Sum(nil)
 
 	if verbose {
-		fmt.Printf("Calculated md5 of \"%s\".\n", path)
+		fmt.Printf("calculated md5 for file: %s\n", path)
 	} else {
 		fmt.Print(".")
 	}
@@ -207,6 +216,9 @@ func getUniqueHashes(files []string, fsLimit int, verbose bool) map[string][]str
 	for i, path := range files {
 		go hashWorker(path, md5s, &wg, verbose)
 		if fsLimit > 0 && (i % fsLimit == 0) {
+			if verbose {
+				fmt.Printf("waiting for waiting group...\n")
+			}
 			wg.Wait()
 		}
 	}
