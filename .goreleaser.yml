@@ -3,6 +3,7 @@
 before:
   hooks:
     - go mod download
+    - go test .
     - golangci-lint run .
 builds:
 - env:

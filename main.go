@@ -5,6 +5,7 @@ When duplicates are found, it can provide an option to delete one of the them.
 package main
 
 import (
+	"bufio"
 	"crypto/md5"
 	"flag"
 	"fmt"
@@ -12,28 +13,42 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strconv"
+	"strings"
 )
 
-const version = "0.4.6"
+type action string
 
-func getFlags() (bool, int, bool, string, string, bool) {
+const (
+	version           = "0.5.0"
+	KB                = 1024
+	keepAction action = "keep"
+	listAction action = "list"
+)
+
+func getFlags() (action, int, bool, []string, string, bool, bool, int) {
 	var (
-		showHelp, showVersion, verbose, fix, skipManual bool
-		fsLimit                                         int
-		prefer, root                                    string
+		showHelp, showVersion, skipManual bool
+		verbose, dryRun                   bool
+		fsLimit, sampleSize               int
+		useAction, prefer                 string
+		roots                             []string
 	)
 
 	flag.BoolVar(&showHelp, "help", false, "display help")
 	flag.BoolVar(&showVersion, "version", false, "display the version number")
 	flag.BoolVar(&verbose, "verbose", false, "provide verbose output")
-	flag.IntVar(&fsLimit, "fs-limit", 0, "limit the maximum number open files")
-	flag.BoolVar(&fix, "fix", false, "try to fix issues, not only list them")
-	flag.StringVar(&prefer, "prefer", "", "limit the maximum number of duplicates to fix")
+	flag.IntVar(&fsLimit, "fs-limit", 100, "limit the maximum number open files")
+	flag.StringVar(&useAction, "action", "list", "action to use for duplicates found (list, keep, delete)")
+	flag.StringVar(&prefer, "prefer", "", "regexp to keep files if a duplicate matches it")
 	flag.BoolVar(&skipManual, "skip-manual", false, "skip decisions if prefer did not find anything")
+	flag.BoolVar(&dryRun, "dry-run", false, "dry run, nothing will be deleted but deletion logic will be executed")
+	flag.IntVar(&sampleSize, "sample-size", 1024, "sample size to use for calculating file hashes (KB)")
 
 	flag.Parse()
 
-	root = flag.Arg(0)
+	roots = flag.Args()
 
 	if showHelp {
 		flag.PrintDefaults()
@@ -45,25 +60,33 @@ func getFlags() (bool, int, bool, string, string, bool) {
 		os.Exit(0)
 	}
 
-	return fix, fsLimit, verbose, root, prefer, skipManual
+	a := listAction
+	if useAction == string(keepAction) {
+		a = keepAction
+	}
+
+	sampleSize *= KB
+
+	return a, fsLimit, verbose, roots, prefer, skipManual, dryRun, sampleSize
+
 }
 
 func main() {
-	fix, fsLimit, verbose, root, prefer, skipManual := getFlags()
+	useAction, fsLimit, verbose, roots, prefer, skipManual, dryRun, sampleSize := getFlags()
 
-	if root == "" {
-		root = "."
+	if len(roots) == 0 {
+		roots = []string{"."}
 	}
 
-	filesizes, err := getAllFilesizes(root, verbose)
+	fileSizes, err := getAllFileSizes(roots, verbose)
 	if err != nil {
 		fmt.Printf("filepath.Walk() returned an error: %v\n", err)
 		return
 	} else {
-		fmt.Printf("Found %d unique file sizes\n", len(filesizes))
+		fmt.Printf("Found %d unique file sizes\n", len(fileSizes))
 	}
 
-	sameSizeFiles, count := filterSameSizeFiles(filesizes)
+	sameSizeFiles, count := filterSameSizeFiles(fileSizes)
 	if count > 0 {
 		fmt.Printf("%d files need to be hashed:\n", count)
 	} else {
@@ -71,7 +94,7 @@ func main() {
 		return
 	}
 
-	sameHashFiles, count := filterSameHashFiles(sameSizeFiles, fsLimit, verbose)
+	sameHashFiles, count := filterSameHashFiles(sameSizeFiles, fsLimit, sampleSize, verbose)
 	if count > 0 {
 		fmt.Printf("%d files have duplicated hashes\n", count)
 	} else {
@@ -79,16 +102,12 @@ func main() {
 		return
 	}
 
-	if fix {
-		cleanUp(sameHashFiles, prefer, skipManual)
-	} else {
-		listAll(sameHashFiles)
-	}
+	execute(sameHashFiles, useAction, prefer, skipManual, dryRun)
 }
 
-// getAllFilesizes scans the root directory recursively and returns the path of each file found
-func getAllFilesizes(root string, verbose bool) (map[int64][]string, error) {
-	filesizes := make(map[int64][]string)
+// getAllFileSizes scans root directories recursively and returns the path of each file found
+func getAllFileSizes(roots []string, verbose bool) (map[int64][]string, error) {
+	fileSizes := make(map[int64][]string)
 
 	visit := func(path string, f os.FileInfo, err error) error {
 		if f.IsDir() {
@@ -106,47 +125,59 @@ func getAllFilesizes(root string, verbose bool) (map[int64][]string, error) {
 			return nil
 		}
 
-		if val, ok := filesizes[f.Size()]; ok {
-			filesizes[f.Size()] = append(val, path)
+		if val, ok := fileSizes[f.Size()]; ok {
+			fileSizes[f.Size()] = append(val, path)
 		} else {
-			filesizes[f.Size()] = []string{path}
+			fileSizes[f.Size()] = []string{path}
 		}
 
 		return nil
 	}
 
-	err := filepath.Walk(root, visit)
+	for _, root := range roots {
+		err := filepath.Walk(root, visit)
+		if err != nil {
+			return nil, err
+		}
+	}
 
-	return filesizes, err
+	for size, paths := range fileSizes {
+		fileSizes[size] = uniqueStrings(paths)
+	}
+
+	return fileSizes, nil
 }
 
-// filterSameSizeFiles returns a list of filepaths that have non-unique length
-func filterSameSizeFiles(filesizes map[int64][]string) (map[int64][]string, int) {
+// filterSameSizeFiles returns a list of file paths that have non-unique lengths
+func filterSameSizeFiles(fileSizes map[int64][]string) (map[int64][]string, int) {
 	sameSizeFiles := make(map[int64][]string)
 	count := 0
 
-	for size, files := range filesizes {
-		if len(files) > 1 {
-			sameSizeFiles[size] = files
-			count += len(files)
+	for size, files := range fileSizes {
+		if len(files) <= 1 {
+			continue
 		}
+
+		sameSizeFiles[size] = files
+		count += len(files)
 	}
 
 	return sameSizeFiles, count
 }
 
 // filterSameHashFiles removes strings from a sameSizeFiles, and map all files that have a unique md5 hash
-func filterSameHashFiles(sameSizeFiles map[int64][]string, fsLimit int, verbose bool) ([][]string, int) {
-	sameHashFiles := [][]string{}
-	count := 0
-	cur := 0
+func filterSameHashFiles(sameSizeFiles map[int64][]string, fsLimit, sampleSize int, verbose bool) ([][]string, int) {
+	var (
+		sameHashFiles [][]string
+		count, cur    int
+	)
 
 	for _, files := range sameSizeFiles {
 		if verbose {
 			fmt.Printf("Hashing files: %v\n", files)
 		}
 
-		uniqueHashes := getUniqueHashes(files, fsLimit, verbose)
+		uniqueHashes := getUniqueHashes(files, fsLimit, sampleSize, verbose)
 
 		for _, paths := range uniqueHashes {
 			if len(paths) > 1 {
@@ -169,9 +200,18 @@ type md5ToHash struct {
 }
 
 // hashWorker calculates the md5 hash value of a file and pushes it into a channel
-func hashWorker(path string, md5s chan *md5ToHash, verbose bool) {
+func hashWorker(path string, md5s chan *md5ToHash, sampleSize int, verbose bool) {
 	if verbose {
 		fmt.Printf("About to read \"%s\"\n", path)
+	}
+
+	fi, err := os.Stat(path)
+	if err != nil {
+		log.Fatalf("can't stat file: %s, err: %v", path, err)
+	}
+
+	if fi.Size() < 1024 {
+		sampleSize = int(fi.Size())
 	}
 
 	f, err := os.Open(path)
@@ -179,7 +219,7 @@ func hashWorker(path string, md5s chan *md5ToHash, verbose bool) {
 		log.Fatal(err)
 	}
 
-	data := make([]byte, 1024)
+	data := make([]byte, sampleSize)
 
 	_, err = f.Read(data)
 	if err != nil {
@@ -207,11 +247,11 @@ func hashWorker(path string, md5s chan *md5ToHash, verbose bool) {
 }
 
 // getUniqueHashes calculates the md5 hash of each file present in a map of sizes to paths of same size files
-func getUniqueHashes(files []string, fsLimit int, verbose bool) map[string][]string {
+func getUniqueHashes(files []string, fsLimit, samleSize int, verbose bool) map[string][]string {
 	md5s := make(chan *md5ToHash, fsLimit)
 
 	for _, path := range files {
-		go hashWorker(path, md5s, verbose)
+		go hashWorker(path, md5s, samleSize, verbose)
 	}
 
 	return getHashResults(md5s, len(files))
@@ -239,14 +279,10 @@ func getHashResults(md5s chan *md5ToHash, max int) map[string][]string {
 	return uniqueHashes
 }
 
-// cleanUp deletes all, but one instance of the same file
-// number of kept file is read from standard input (count starts from 1)
-// number zero returned will skip file deletion
-// os part is done in deleteOtherFiles
-func cleanUp(sameSizeFiles [][]string, prefer string, skipManual bool) {
+// execute deletes duplicates based on rules (prefer) and user input (unless skipManual is set)
+func execute(sameSizeFiles [][]string, useAction action, prefer string, skipManual, dryRun bool) {
 	var (
 		preferRegexp *regexp.Regexp
-		keep         int
 	)
 
 	if prefer != "" {
@@ -256,70 +292,192 @@ func cleanUp(sameSizeFiles [][]string, prefer string, skipManual bool) {
 	for _, files := range sameSizeFiles {
 		fmt.Println("The following files are the same:")
 
-		keep = 0
+		var answerMap = map[int]string{}
 		for key, file := range files {
+			if preferRegexp != nil && preferRegexp.MatchString(file) {
+				fmt.Printf("[preferred] %s\n", file)
+				continue
+			}
+
 			fmt.Printf("[%d] %s\n", key+1, file)
 
-			if preferRegexp == nil || keep < 0 || !preferRegexp.MatchString(file) {
-				continue
-			}
-
-			// We found more than one preferred file here...
-			if keep > 0 {
-				keep = -1
-				continue
-			}
-
-			keep = key + 1
+			answerMap[key] = file
 		}
 
-		if keep < 1 && skipManual {
+		if useAction == listAction {
+			fmt.Printf("\n")
+			continue
+		}
+
+		if len(answerMap) == len(files) && skipManual {
 			fmt.Printf("Preferred file not found, deletion skipped.\n\n")
 			continue
 		}
 
-		for keep < 1 || keep > len(files) {
-			keep = readInt(len(files))
+		var deleteFiles []string
+		if !skipManual && useAction == keepAction {
+			deleteFiles = readKeep(answerMap, len(files))
 		}
 
-		if keep == 0 {
+		if len(deleteFiles) == 0 {
 			fmt.Printf("Deletion skipped.\n\n")
-		} else if keep > 0 {
-			fmt.Printf("Deleting all, but `%s`.\n", files[keep-1])
-
-			deleteOtherFiles(files, keep)
-
-			fmt.Printf("\n\n")
-		}
-	}
-}
-
-// readInt reads an integer from standard input, minimum value is 0, maximum is given as parameter
-func readInt(max int) int {
-	var i int
-
-	for i < 1 || i > max {
-		fmt.Println("Which one of these should we keep? (O for keeping all)")
-		_, err := fmt.Scanf("%d", &i)
-
-		if err != nil {
-			i = 0
 			continue
 		}
 
-		if i == 0 {
-			return 0
+		if len(deleteFiles) == len(files) {
+			fmt.Printf("All files marked for deletion, therefore aborting!\n\n")
+			continue
+		}
+
+		deleteOtherFiles(deleteFiles, dryRun)
+
+		fmt.Printf("\n\n")
+	}
+}
+
+// readKeep reads standard in to figure out which duplicates to keep
+func readKeep(answerMap map[int]string, max int) []string {
+	var (
+		parsed []int
+		res    []string
+		ok     bool
+	)
+
+	fmt.Println("Which one of these should we keep? (eg: 1 2 3, 2-3)")
+
+	scanner := bufio.NewScanner(os.Stdin)
+	for !ok {
+		scanner.Scan()
+		s := scanner.Text()
+		if s == "" {
+			break
+		}
+
+		parsed, ok = parseRead(s, max)
+		if !ok {
+			fmt.Print("again: ")
+			continue
+		}
+
+		if !allParsedFound(parsed, answerMap) {
+			ok = false
+			continue
 		}
 	}
 
-	return i
+	for _, v := range parsed {
+		_, ok := answerMap[v-1]
+		if !ok {
+			fmt.Print("again: ")
+			continue
+		}
+
+		delete(answerMap, v-1)
+	}
+
+	for _, f := range answerMap {
+		res = append(res, f)
+	}
+
+	return res
 }
 
-// deleteOtherFiles deletes a list of files, except for the i.-th file, counting from 1
-func deleteOtherFiles(files []string, keep int) {
-	delFiles := append(files[:keep-1], files[keep:]...)
+// allParsedFound returns true if all numbers read from the standard in our in the answerMap
+func allParsedFound(parsed []int, answerMap map[int]string) bool {
+	for _, v := range parsed {
+		_, ok := answerMap[v-1]
+		if !ok {
+			return false
+		}
+	}
 
-	for _, file := range delFiles {
+	return true
+}
+
+// parseRead parses a line read from standard in as numbers for files to keep
+func parseRead(s string, max int) ([]int, bool) {
+	if s == "" {
+		return nil, false
+	}
+
+	elements := strings.Split(s, " ")
+
+	if len(elements) < 1 {
+		return nil, false
+	}
+
+	var res []int
+	for _, elem := range elements {
+		parts, ok := parseElem(elem, max)
+		if !ok {
+			return nil, false
+		}
+
+		res = append(res, parts...)
+	}
+
+	if len(res) == 0 {
+		return res, true
+	}
+
+	res = uniqueInts(res)
+
+	return res, true
+}
+
+// parseElem will parse one part of a line read from standard in (part is separated by spaces)
+func parseElem(elem string, max int) ([]int, bool) {
+	parts := strings.Split(elem, "-")
+
+	if len(parts) > 2 {
+		return nil, false
+	}
+
+	if len(parts) == 2 {
+		return generateRange(parts[0], parts[1], max)
+	}
+
+	return generateRange(parts[0], parts[0], max)
+}
+
+// generateRange
+func generateRange(from, to string, max int) ([]int, bool) {
+	if from == "" || to == "" {
+		return nil, false
+	}
+
+	ar, err := strconv.ParseInt(from, 10, 64)
+	if err != nil {
+		return nil, false
+	}
+	a := int(ar)
+
+	br, err := strconv.ParseInt(to, 10, 64)
+	if err != nil {
+		return nil, false
+	}
+	b := int(br)
+
+	if a > b || a < 1 || b > max {
+		return nil, false
+	}
+
+	var res []int
+	for i := a; i <= b; i++ {
+		res = append(res, i)
+	}
+
+	return res, true
+}
+
+// deleteOtherFiles deletes a list of files, unless dryRun is set
+func deleteOtherFiles(deleteFiles []string, dryRun bool) {
+	for _, file := range deleteFiles {
+		if dryRun {
+			fmt.Printf("Removing: %s (skipped)\n", file)
+			continue
+		}
+
 		fmt.Printf("Removing: %s\n", file)
 
 		err := os.Remove(file)
@@ -331,18 +489,40 @@ func deleteOtherFiles(files []string, keep int) {
 	}
 }
 
-// cleanUp deletes all, but one instance of the same file
-// number of kept file is read from standard input (count starts from 1)
-// number zero returned will skip file deletion
-// os part is done in deleteOtherFiles
-func listAll(sameSizeFiles [][]string) {
-	for _, files := range sameSizeFiles {
-		fmt.Println("The following files are likely the same:")
+// uniqueInts returns unique integers from a list of integers
+func uniqueInts(ints []int) []int {
+	all := map[int]int{}
+	for _, val := range ints {
+		all[val] = val
+	}
 
-		for key, file := range files {
-			fmt.Printf("[%d] %s\n", key+1, file)
+	var res []int
+	for val := range all {
+		res = append(res, val)
+	}
+
+	sort.Ints(res)
+
+	return res
+}
+
+// uniqueStrings returns unique strings from a list of strings
+func uniqueStrings(arr []string) []string {
+	all := map[string]string{}
+	for _, val := range arr {
+		all[val] = val
+	}
+
+	var res []string
+	for val := range all {
+		if val == "" {
+			continue
 		}
 
-		fmt.Println()
+		res = append(res, val)
 	}
+
+	sort.Strings(res)
+
+	return res
 }
