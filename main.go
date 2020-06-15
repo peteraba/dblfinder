@@ -21,18 +21,18 @@ import (
 type action string
 
 const (
-	version           = "0.5.0"
+	version           = "0.5.1"
 	KB                = 1024
 	keepAction action = "keep"
 	listAction action = "list"
 )
 
-func getFlags() (action, int, bool, []string, string, bool, bool, int) {
+func getFlags() (action, int, bool, []string, string, string, bool, bool, int) {
 	var (
 		showHelp, showVersion, skipManual bool
 		verbose, dryRun                   bool
 		fsLimit, sampleSize               int
-		useAction, prefer                 string
+		useAction, ignore, prefer         string
 		roots                             []string
 	)
 
@@ -41,6 +41,7 @@ func getFlags() (action, int, bool, []string, string, bool, bool, int) {
 	flag.BoolVar(&verbose, "verbose", false, "provide verbose output")
 	flag.IntVar(&fsLimit, "fs-limit", 100, "limit the maximum number open files")
 	flag.StringVar(&useAction, "action", "list", "action to use for duplicates found (list, keep, delete)")
+	flag.StringVar(&ignore, "ignore", "", "regexp to ignore files completely")
 	flag.StringVar(&prefer, "prefer", "", "regexp to keep files if a duplicate matches it")
 	flag.BoolVar(&skipManual, "skip-manual", false, "skip decisions if prefer did not find anything")
 	flag.BoolVar(&dryRun, "dry-run", false, "dry run, nothing will be deleted but deletion logic will be executed")
@@ -67,18 +68,18 @@ func getFlags() (action, int, bool, []string, string, bool, bool, int) {
 
 	sampleSize *= KB
 
-	return a, fsLimit, verbose, roots, prefer, skipManual, dryRun, sampleSize
+	return a, fsLimit, verbose, roots, ignore, prefer, skipManual, dryRun, sampleSize
 
 }
 
 func main() {
-	useAction, fsLimit, verbose, roots, prefer, skipManual, dryRun, sampleSize := getFlags()
+	useAction, fsLimit, verbose, roots, ignore, prefer, skipManual, dryRun, sampleSize := getFlags()
 
 	if len(roots) == 0 {
 		roots = []string{"."}
 	}
 
-	fileSizes, err := getAllFileSizes(roots, verbose)
+	fileSizes, err := getAllFileSizes(roots, ignore, verbose)
 	if err != nil {
 		fmt.Printf("filepath.Walk() returned an error: %v\n", err)
 		return
@@ -106,11 +107,23 @@ func main() {
 }
 
 // getAllFileSizes scans root directories recursively and returns the path of each file found
-func getAllFileSizes(roots []string, verbose bool) (map[int64][]string, error) {
+func getAllFileSizes(roots []string, ignore string, verbose bool) (map[int64][]string, error) {
+	var (
+		ignoreRegexp *regexp.Regexp
+	)
+
+	if ignore != "" {
+		ignoreRegexp = regexp.MustCompile(ignore)
+	}
+
 	fileSizes := make(map[int64][]string)
 
 	visit := func(path string, f os.FileInfo, err error) error {
 		if f.IsDir() {
+			return nil
+		}
+
+		if ignoreRegexp != nil && ignoreRegexp.MatchString(path) {
 			return nil
 		}
 
@@ -289,8 +302,10 @@ func execute(sameSizeFiles [][]string, useAction action, prefer string, skipManu
 		preferRegexp = regexp.MustCompile(prefer)
 	}
 
-	for _, files := range sameSizeFiles {
-		fmt.Println("The following files are the same:")
+	fmt.Println()
+
+	for i, files := range sameSizeFiles {
+		fmt.Printf("The following files are the same (%d / %d):\n", i, len(sameSizeFiles))
 
 		var answerMap = map[int]string{}
 		for key, file := range files {
