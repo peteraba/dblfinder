@@ -21,8 +21,8 @@ import (
 type action string
 
 const (
-	version           = "0.5.1"
-	KB                = 1024
+	version           = "0.5.2"
+	KB                = 20
 	keepAction action = "keep"
 	listAction action = "list"
 )
@@ -39,7 +39,7 @@ func getFlags() (action, int, bool, []string, string, string, bool, bool, int) {
 	flag.BoolVar(&showHelp, "help", false, "display help")
 	flag.BoolVar(&showVersion, "version", false, "display the version number")
 	flag.BoolVar(&verbose, "verbose", false, "provide verbose output")
-	flag.IntVar(&fsLimit, "fs-limit", 100, "limit the maximum number open files")
+	flag.IntVar(&fsLimit, "fs-limit", 10, "limit the maximum number open files")
 	flag.StringVar(&useAction, "action", "list", "action to use for duplicates found (list, keep, delete)")
 	flag.StringVar(&ignore, "ignore", "", "regexp to ignore files completely")
 	flag.StringVar(&prefer, "prefer", "", "regexp to keep files if a duplicate matches it")
